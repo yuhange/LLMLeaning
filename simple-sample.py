@@ -19,6 +19,7 @@ with open('sales_textbook.txt', 'r') as f:
 	text = f.read()
 
 # hyperparameters (超参数)
+num_heads = 4 # 多头。维度分成几块
 batch_size = 4 #一次几段话 (transformer支持并行)
 context_length = 16 #截取一段话，每句话里16个token
 d_model = 64 #64个维度
@@ -67,4 +68,57 @@ position_encoding_lookup_table = position_encoding_lookup_table.unsqueeze(0).exp
 x = x_batch_embedded + position_encoding_lookup_table
 y = y_batch_embedded + position_encoding_lookup_table
 
+Wq = nn.Linear(d_model, d_model)
+Wk = nn.Linear(d_model, d_model)
+Wv = nn.Linear(d_model, d_model)
 
+Q = Wq(x)
+K = Wq(x)
+V = Wq(x)
+
+# apply multi head
+Q = Q.view(batch_size, context_length, num_heads, d_model // num_heads)
+Q = Q.permute(0, 2, 1, 3) # 把中间两个维度换一下顺序？
+K = K.view(batch_size, context_length, num_heads, d_model // num_heads).permute(0, 2, 1, 3) # 把中间两个维度换一下顺序？
+V = V.view(batch_size, context_length, num_heads, d_model // num_heads).permute(0, 2, 1, 3) # 把中间两个维度换一下顺序？
+
+output = Q @ K.transpose(-2, -1) / math.sqrt(d_model//num_heads) # 从论文里抄过来
+
+# apply mask
+mask = torch.triu(torch.ones(context_length, context_length), diagonal = 1).bool()
+output = output.masked_fill(mask, float('-inf'))
+
+# print(output)
+
+# apply softmax
+attention_score = F.softmax(output, dim=-1)
+
+# apply attention @ V
+A = attention_score @ V 
+
+# apply concatenate
+A = A.permute(0, 2, 1, 3).reshape(batch_size, context_length, d_model)
+
+Wo = nn.Linear(d_model, d_model)
+
+output = Wo(A)
+
+# apply residual connection
+output = output + x 
+
+
+# print(output)
+
+# apply layer normalization
+layer_norm = nn.LayerNorm(d_model)
+layer_norm_output = layer_norm(output)
+
+# apply feed forward
+output = nn.Linear(d_model, d_model * 4)(layer_norm_output)
+output = nn.ReLU()(output)
+output = nn.Linear(d_model * 4, d_model)(output)
+
+output = output + layer_norm_output
+
+output = layer_norm(output)
+print(output)
