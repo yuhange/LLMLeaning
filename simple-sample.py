@@ -121,4 +121,12 @@ output = nn.Linear(d_model * 4, d_model)(output)
 output = output + layer_norm_output
 
 output = layer_norm(output)
-print(output)
+# print(output)
+
+# apply final linear layer
+output = nn.Linear(d_model, max_token_value + 1)(output)
+
+# apply final sofmax
+logits = F.softmax(output, dim=-1)
+predicted_index = (torch.argmax(logits[1,14]).item())
+print(encoding.decode([predicted_index]))
