@@ -20,7 +20,7 @@ dropout = 0.1
 max_iters = 500
 eval_interval = 50
 eval_iters = 20
-device = 'cuda' if torch.cuda.is_available() els 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 TORCH_SEED = 1337
 torch.manual_seed(TORCH_SEED)
 
@@ -49,7 +49,7 @@ validation_data = tokenized_text[train_index:]
 
 class FeedForwadNetwork(nn.Module):
 	def __init__(self):
-		super(self).__init__()
+		super().__init__()
 		self.linear1 = nn.Linear(d_model, d_model * 4)
 		self.ReLu = nn.ReLU()
 		self.linear2 = nn.Linear(d_model * 4, d_model)
@@ -62,43 +62,48 @@ class FeedForwadNetwork(nn.Module):
 		x = self.dropout(x)
 		return x
 
-class ScaledDotProductAttention(nn.Module):
+# Define Scaled Dot Product Attention
+class Attention(nn.Module):
 	def __init__(self):
-		super(self).__init__()
-		self.Wq = nn.Linear(d_model, d_model)
-		self.Wk = nn.Linear(d_model, d_model)
-		self.Wv = nn.Linear(d_model, d_model)
-		# apply mask
+		super().__init__()
+		self.Wq = nn.Linear(d_model, d_model // num_heads, bias=False)
+		self.Wk = nn.Linear(d_model, d_model // num_heads, bias=False)
+		self.Wv = nn.Linear(d_model, d_model // num_heads, bias=False)
 		self.register_buffer('mask', torch.tril(torch.ones(context_length, context_length)))
+		self.dropout = nn.Dropout(dropout)
 
 	def forward(self, x):
-		Q = x @ self.Wq
-		K = x @ self.Wk
-		V = x @ self.Wv
+		B, T, C = x.shape
+		q = self.Wq(x)
+		k = self.Wk(x)
+		v = self.Wv(x)
 
-		attention = Q @ K.transpose(-2, -1) / math.sqrt(d_model//num_heads)
-		attention = attention.masked_fill(self.mask==0, float('-inf'))
-		attention = F.softmax(attention, dim = -1)
-		attention = attention @ V 
-		return attention
+		weights = (q @ k.transpose(-2, -1)) / math.sqrt(d_model // num_heads)
+		weights = weights.masked_fill(self.mask[:T, :T] == 0, float('-inf'))
+		weights = F.softmax(weights, dim=-1)
+		weights = self.dropout(weights)
+
+		output = weights @ v
+
+		return output
 
 class MultiHeadAttention(nn.Module):
 	def __init__(self):
-		super(self).__init__()
-		self.heads = nn.ModuleList([ScaledDotProductAttention() for _ in range(num_heads)])
+		super().__init__()
+		self.heads = nn.ModuleList([Attention() for _ in range(num_heads)])
 		self.projection_layer = nn.Linear(d_model, d_model)
 		self.dropout = nn.Dropout(dropout)
 
 	def forward(self, x):
-		self.heads = [head(x) for head in self.heads]
-		out = torch.cat(self.heads, dim=-1)
-		out = self.projection_layer(out)
+		head_outputs = [head(x) for head in self.heads]
+		head_outputs = torch.cat(head_outputs, dim=-1)
+		out = self.projection_layer(head_outputs)
 		out = self.dropout(out)
 		return out
 
 class TransformerBlock(nn.Module):
 	def __init__(self):
-		super(self).__init__()
+		super().__init__()
 		self.layer_norm1 = nn.LayerNorm(d_model)
 		self.layer_norm2 = nn.LayerNorm(d_model)
 		self.multi_head_attention = MultiHeadAttention()
@@ -110,56 +115,61 @@ class TransformerBlock(nn.Module):
 		return x
 
 class Model(nn.Module):
-	def __init__(self):
-		super(self).__init__()
+	def __init__(self, max_token_value=100256): # if not passed, force to be default tiktoken cl100k vocab size
+		super().__init__()
 		self.token_embedding_lookup_table = nn.Embedding(max_token_value, d_model)
-		self.transformer_blocks = nn.ModuleList([TransformerBlock() for _ in range(num_blocks)])
+		self.transformer_blocks = nn.Sequential(*(
+				[TransformerBlock() for _ in range(num_blocks)] +
+				[nn.LayerNorm(d_model)]
+		))
 		self.model_out_linear_layer = nn.Linear(d_model, max_token_value)
 
-	def forward(self, idx, target=None):
+
+	def forward(self, idx, targets=None):
 		B, T = idx.shape
 		position_encoding_lookup_table = torch.zeros(context_length, d_model, device=device)
 		position = torch.arange(0, context_length, dtype=torch.float).unsqueeze(1)
-		div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
+		div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 		position_encoding_lookup_table[:, 0::2] = torch.sin(position * div_term)
 		position_encoding_lookup_table[:, 1::2] = torch.cos(position * div_term)
-		position_encoding_lookup_table = position_encoding_lookup_table.unsqueeze(0).expand(batch_size, -1, -1) # add batch to first dimension
+		# change position_encoding_lookup_table from (context_length, d_model) to (T, d_model)
 		position_embedding = position_encoding_lookup_table[:T, :].to(device)
 		x = self.token_embedding_lookup_table(idx) + position_embedding
 		x = self.transformer_blocks(x)
+		# get the final logits
 		logits = self.model_out_linear_layer(x)
 
 		if targets is not None:
-			B,T,C = logits.shape
-			logits_reshaped = logits.view(B*T, C)
-			target_reshaped = logits.view(B*T)
-			loss = F.cross_entropy(input=logits_reshaped, target=target_reshaped)
+		    B, T, C = logits.shape
+		    logits_reshaped = logits.view(B * T, C)
+		    targets_reshaped = targets.view(B * T)
+		    loss = F.cross_entropy(input=logits_reshaped, target=targets_reshaped)
 		else:
 			loss = None
 		return logits, loss
 
 	def generate(self, idx, max_new_tokens=100):
-        # idx is (B,T) array of indices in the current context
-        for _ in range(max_new_tokens):
-            # Crop idx to the max size of our positional embeddings table
-            idx_crop = idx[:, -context_length:]
-            # Get predictions
-            logits, loss = self.forward(idx_crop)
-            # Get the last time step from logits where the dimensions of the logits are (B,T,C)
-            logits_last_timestep = logits[:, -1, :]
-            # Apply softmax to get probabilities
-            probs = F.softmax(input=logits_last_timestep, dim=-1)
-            # Sample from the probabilities' distribution.
-            idx_next = torch.multinomial(input=probs, num_samples=1)
-            # Append the sampled indexes idx_next to idx
-            idx = torch.cat((idx, idx_next), dim=1)
-        return idx
+		# idx is (B,T) array of indices in the current context
+		for _ in range(max_new_tokens):
+			# Crop idx to the max size of our positional embeddings table
+			idx_crop = idx[:, -context_length:]
+			# Get predictions
+			logits, loss = self.forward(idx_crop)
+			# Get the last time step from logits where the dimensions of the logits are (B,T,C)
+			logits_last_timestep = logits[:, -1, :]
+			# Apply softmax to get probabilities
+			probs = F.softmax(input=logits_last_timestep, dim=-1)
+			# Sample from the probabilities' distribution.
+			idx_next = torch.multinomial(input=probs, num_samples=1)
+			# Append the sampled indexes idx_next to idx
+			idx = torch.cat((idx, idx_next), dim=1)
+		return idx
 
 model = Model().to(device)
 
 # get batch
 def get_batch(split: str):
-    data = train_data if split == 'train' else val_data
+    data = train_data if split == 'train' else validation_data
     idxs = torch.randint(low=0, high=len(data) - context_length, size=(batch_size,))
     x = torch.stack([data[idx:idx + context_length] for idx in idxs]).to(device)
     y = torch.stack([data[idx + 1:idx + context_length + 1] for idx in idxs]).to(device)
@@ -190,14 +200,22 @@ for step in range(max_iters):
         losses = estimate_loss()
         tracked_losses.append(losses)
         print('Step:', step, 'Training Loss:', round(losses['train'].item(), 3), 'Validation Loss:', round(losses['valid'].item(), 3))
-        run.track(round(losses['train'].item(), 3), name='Training Loss')
-        run.track(round(losses['valid'].item(), 3), name='Validation Loss')
-
+        
     xb, yb = get_batch('train')
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+    loss.backward()  # 自动往后一步，更新权重
+    optimizer.step() # 回来
 
 # Save the model
 torch.save(model.state_dict(), 'model/model-scifi.pt')
+
+model.eval()
+start = "The product is "
+start_ids = encoding.encode(start)
+x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+y = model.generate(x, max_new_tokens=100)
+print("--------------")
+print(encoding.decode(y[0].tolist()))
+print("--------------")
+
